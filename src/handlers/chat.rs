@@ -13,6 +13,7 @@ use crate::{
     state::SharedState,
 };
 
+// HTTP GET: Fetch recent chat history
 pub async fn get_history(State(state): State<SharedState>) -> Json<Vec<ChatMessage>> {
     let messages = sqlx::query_as::<_, ChatMessage>(
         r#"
@@ -31,6 +32,7 @@ pub async fn get_history(State(state): State<SharedState>) -> Json<Vec<ChatMessa
     Json(messages)
 }
 
+// WebSocket Upgrade Handler
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
@@ -38,10 +40,12 @@ pub async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+// WebSocket Connection Loop (Handles incoming messages, saves to DB, & broadcasts)
 async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_tx.subscribe();
 
+    // Broadcast receiver task (sends messages out to this client)
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
             if sender.send(Message::Text(msg.into())).await.is_err() {
@@ -50,33 +54,51 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         }
     });
 
+    // Receiver task (listens for incoming messages from this client)
     let state_clone = state.clone();
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            if let Ok(payload) = serde_json::from_str::<NewChatPayload>(&text) {
-                let _ = sqlx::query(
-                    "INSERT INTO users (wallet_address) VALUES ($1) ON CONFLICT DO NOTHING",
-                )
-                .bind(&payload.wallet_address)
-                .execute(&state_clone.db)
-                .await;
+        while let Some(result) = receiver.next().await {
+            match result {
+                Ok(Message::Text(text)) => {
+                    if let Ok(payload) = serde_json::from_str::<NewChatPayload>(&text) {
+                        let trimmed_content = payload.content.trim();
+                        if trimmed_content.is_empty() || trimmed_content.len() > 500 {
+                            continue; // Skip empty or overly long spam messages
+                        }
 
-                if let Ok(saved) = sqlx::query_as::<_, ChatMessage>(
-                    r#"
-                    INSERT INTO chat_messages (wallet_address, content)
-                    VALUES ($1, $2)
-                    RETURNING id, wallet_address, NULL::TEXT as username, content, created_at
-                    "#,
-                )
-                .bind(&payload.wallet_address)
-                .bind(&payload.content)
-                .fetch_one(&state_clone.db)
-                .await
-                {
-                    if let Ok(json_out) = serde_json::to_string(&saved) {
-                        let _ = state_clone.ws_tx.send(json_out);
+                        // Ensure user exists
+                        let _ = sqlx::query(
+                            "INSERT INTO users (wallet_address) VALUES ($1) ON CONFLICT DO NOTHING",
+                        )
+                        .bind(&payload.wallet_address)
+                        .execute(&state_clone.db)
+                        .await;
+
+                        // Save message to Postgres
+                        if let Ok(saved) = sqlx::query_as::<_, ChatMessage>(
+                            r#"
+                            INSERT INTO chat_messages (wallet_address, content)
+                            VALUES ($1, $2)
+                            RETURNING id, wallet_address, NULL::TEXT as username, content, created_at
+                            "#,
+                        )
+                        .bind(&payload.wallet_address)
+                        .bind(&trimmed_content)
+                        .fetch_one(&state_clone.db)
+                        .await
+                        {
+                            if let Ok(json_out) = serde_json::to_string(&saved) {
+                                let _ = state_clone.ws_tx.send(json_out);
+                            }
+                        }
                     }
                 }
+                Ok(Message::Ping(p)) => {
+                    if sender.send(Message::Pong(p)).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break, // Disconnect on close or protocol error
             }
         }
     });

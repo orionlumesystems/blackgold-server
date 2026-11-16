@@ -1,5 +1,5 @@
-use axum::{extract::State, Json};
 use crate::{models::RoundSummary, state::SharedState};
+use axum::{extract::State, Json};
 
 pub async fn get_rounds(State(state): State<SharedState>) -> Json<Vec<RoundSummary>> {
     let rounds = sqlx::query_as::<_, RoundSummary>(

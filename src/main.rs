@@ -21,7 +21,7 @@ async fn main() {
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/blkg_mining".to_string());
-    
+
     let db = PgPoolOptions::new()
         .max_connections(10)
         .min_connections(2)
@@ -49,8 +49,11 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/health", get(|| async { "BlackGold Protocol Server Healthy" }))
-        // Chat & WebSockets
+        .route(
+            "/health",
+            get(|| async { "BlackGold Protocol Server Healthy" }),
+        )
+        // Chat (GET history only, POST removed)
         .route("/api/chat", get(handlers::chat::get_history))
         .route("/ws", get(handlers::chat::ws_handler))
         // Protocol Endpoints
